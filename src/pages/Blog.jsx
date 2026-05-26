@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 
 //  helpers 
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -63,6 +63,8 @@ const SEO_CHECKS = [
 
 const AUTHORS_API_URL = import.meta.env.VITE_API_AUTHORS_URL;
 const BLOG_API_URL = import.meta.env.VITE_API_BLOG_URL;
+const BLOG_CREATE_URL =
+  BLOG_API_URL || "http://localhost:5000/api/blog";
 
 const extractAuthors = (payload) => {
   const root = Array.isArray(payload)
@@ -193,6 +195,7 @@ function TagPill({ label, onRemove, variant = "default" }) {
 
 //  EDITOR 
 function EditorView() {
+  const contentEditorRef = useRef(null);
   const [topic, setTopic] = useState("");
   const [primaryKw, setPrimaryKw] = useState("");
   const [secKws, setSecKws] = useState([]);
@@ -229,6 +232,8 @@ function EditorView() {
   const [pubDate, setPubDate] = useState("");
   const [noIndex, setNoIndex] = useState(true);
   const [saveMsg, setSaveMsg] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [coverImageFile, setCoverImageFile] = useState(null);
 
   useEffect(() => {
     let ignore = false;
@@ -277,6 +282,51 @@ function EditorView() {
       setSecKws((prev) => [...prev, v]);
       setSecKwInput("");
     }
+  };
+
+  const applyContentFormat = (type) => {
+    const textarea = contentEditorRef.current;
+    if (!textarea) return;
+
+    const start = textarea.selectionStart ?? 0;
+    const end = textarea.selectionEnd ?? 0;
+    const selectedText = content.slice(start, end);
+    let nextText = content;
+    let nextSelectionStart = start;
+    let nextSelectionEnd = end;
+
+    if (type === "bold") {
+      const inserted = `**${selectedText}**`;
+      nextText = `${content.slice(0, start)}${inserted}${content.slice(end)}`;
+      nextSelectionStart = start + 2;
+      nextSelectionEnd = start + 2 + selectedText.length;
+    } else if (type === "italic") {
+      const inserted = `*${selectedText}*`;
+      nextText = `${content.slice(0, start)}${inserted}${content.slice(end)}`;
+      nextSelectionStart = start + 1;
+      nextSelectionEnd = start + 1 + selectedText.length;
+    } else if (type === "underline") {
+      const inserted = `<u>${selectedText}</u>`;
+      nextText = `${content.slice(0, start)}${inserted}${content.slice(end)}`;
+      nextSelectionStart = start + 3;
+      nextSelectionEnd = start + 3 + selectedText.length;
+    } else if (type === "h1") {
+      const inserted = "# ";
+      nextText = `${content.slice(0, start)}${inserted}${content.slice(end)}`;
+      nextSelectionStart = start + inserted.length;
+      nextSelectionEnd = start + inserted.length;
+    } else if (type === "h2") {
+      const inserted = "## ";
+      nextText = `${content.slice(0, start)}${inserted}${content.slice(end)}`;
+      nextSelectionStart = start + inserted.length;
+      nextSelectionEnd = start + inserted.length;
+    }
+
+    setContent(nextText);
+    setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(nextSelectionStart, nextSelectionEnd);
+    }, 0);
   };
 
   const computeSeoChecks = useCallback(() => {
@@ -330,6 +380,26 @@ function EditorView() {
     !!imgUrl && altText.length > 0 && altText.length <= 125 && !altBad &&
     intOk;
 
+  const canPublish =
+    score >= 90 &&
+    title.trim().length > 0 &&
+    content.trim().length > 0 &&
+    metaTitle.trim().length > 0;
+
+  useEffect(() => {
+    console.log("[Publish State]", {
+      score,
+      canPublish,
+      isSubmitting,
+      allValid,
+      required: {
+        title: !!title.trim(),
+        content: !!content.trim(),
+        metaTitle: !!metaTitle.trim(),
+      },
+    });
+  }, [score, canPublish, isSubmitting, allValid, title, content, metaTitle]);
+
   // FIX A + M: density display uses escapeRegex via computeKeywordDensity
   let densityText  = "Set primary keyword and add content to see density";
   let densityColor = "text-gray-400";
@@ -341,18 +411,92 @@ function EditorView() {
     densityColor = d >= 1 && d <= 2 ? "text-emerald-700" : "text-red-600";
   }
 
-  // FIX O: use state message instead of blocking alert for save feedback
-  const handleSave = (s) => {
-    if (s === "published" && !allValid) {
-      alert("Please fix all validation issues before publishing.");
+  const handleSave = async (s) => {
+    console.log("[Blog Submit] Triggered", { status: s });
+    console.log("[Blog Submit] API FUNCTION CALLED", { url: BLOG_CREATE_URL });
+    if (s === "published" && !canPublish) {
+      alert("Please complete required publish fields and keep SEO score at 90+.");
       return;
     }
-    const msg = `Saved as ${s}  ${new Date().toLocaleTimeString()}`;
-    setSaveMsg(msg);
-    // Defer alert so React can flush setSaveMsg first
-    setTimeout(() => {
-      alert(`Blog saved as "${s}"!\n${allValid ? "... All checks passed" : " Saved as draft with issues"}`);
-    }, 0);
+
+    if (!coverImageFile) {
+      alert("Cover image file is required.");
+      return;
+    }
+
+    if (!author) {
+      alert("Please select an author.");
+      return;
+    }
+
+    const cleanedFaqs = faqs
+      .filter((f) => f.q.trim() && f.a.trim())
+      .map((f) => ({
+        question: f.q.trim(),
+        answer: f.a.trim(),
+      }));
+
+    const cleanedInternalLinks = intLinks.filter((l) => l.trim());
+
+    const formData = new FormData();
+    formData.append("title", title.trim());
+    formData.append("slug", slug.trim());
+    formData.append("meta_title", metaTitle.trim());
+    formData.append("meta_description", metaDesc.trim());
+    formData.append("primary_keyword", primaryKw.trim());
+    formData.append("secondary_keywords", JSON.stringify(secKws));
+    formData.append("author_id", author);
+    formData.append("content_mdx", content);
+    formData.append("answer_block", aeo);
+    formData.append("faq_json", JSON.stringify(cleanedFaqs));
+    formData.append("internal_links", JSON.stringify(cleanedInternalLinks));
+    formData.append("content_summary", summary.trim());
+    formData.append("entities", JSON.stringify(entities));
+    formData.append("cover_image_alt", altText.trim());
+    formData.append("status", s);
+    if (pubDate) {
+      formData.append("published_at", new Date(pubDate).toISOString());
+    }
+    formData.append("cover_image", coverImageFile);
+
+    console.log("[Blog Submit] FormData entries:");
+    for (const [key, value] of formData.entries()) {
+      console.log(" -", key, value instanceof File ? `File(${value.name}, ${value.type}, ${value.size})` : value);
+    }
+
+    try {
+      setIsSubmitting(true);
+      const response = await fetch(BLOG_CREATE_URL, {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+      console.log("[Blog Submit] API response", {
+        status: response.status,
+        ok: response.ok,
+        data,
+      });
+
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.message || "Failed to save blog");
+      }
+
+      const msg = `Saved as ${s} at ${new Date().toLocaleTimeString()}`;
+      setSaveMsg(msg);
+      alert(`Blog saved as "${s}"!\nAll checks passed`);
+    } catch (error) {
+      console.error("[Blog Submit] Error", error);
+      alert(error.message || "Failed to save blog");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSubmit = async (e, statusToSave) => {
+    e.preventDefault();
+    console.log("[Blog Submit] SUBMIT CLICKED", { status: statusToSave });
+    await handleSave(statusToSave);
   };
 
   const scoreCircleColor = score >= 80 ? "bg-emerald-50 text-emerald-800" : score >= 60 ? "bg-amber-50 text-amber-800" : "bg-red-50 text-red-700";
@@ -468,7 +612,14 @@ function EditorView() {
               <div>
                 <FieldLabel required>Blog content</FieldLabel>
                 <Hint>Min 1200 words  exactly one H1  logical H2H4 hierarchy</Hint>
-                <textarea className="w-full border border-gray-200 rounded-lg px-3 py-2 text-[12px] font-mono focus:outline-none focus:border-emerald-500 resize-y" rows={14} value={content} onChange={(e) => setContent(e.target.value)} placeholder={"# Your H1 Heading Here\n\nStart writing your blog content in MDX format...\n\n## Section 1\n\nYour content here..."} />
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  <button type="button" onClick={() => applyContentFormat("bold")} className="px-2.5 py-1 text-[12px] border border-gray-200 rounded-md bg-white text-gray-700 hover:bg-gray-50">Bold</button>
+                  <button type="button" onClick={() => applyContentFormat("italic")} className="px-2.5 py-1 text-[12px] border border-gray-200 rounded-md bg-white text-gray-700 hover:bg-gray-50">Italic</button>
+                  <button type="button" onClick={() => applyContentFormat("underline")} className="px-2.5 py-1 text-[12px] border border-gray-200 rounded-md bg-white text-gray-700 hover:bg-gray-50">Underline</button>
+                  <button type="button" onClick={() => applyContentFormat("h1")} className="px-2.5 py-1 text-[12px] border border-gray-200 rounded-md bg-white text-gray-700 hover:bg-gray-50">H1 (#)</button>
+                  <button type="button" onClick={() => applyContentFormat("h2")} className="px-2.5 py-1 text-[12px] border border-gray-200 rounded-md bg-white text-gray-700 hover:bg-gray-50">H2 (##)</button>
+                </div>
+                <textarea ref={contentEditorRef} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-[12px] font-mono focus:outline-none focus:border-emerald-500 resize-y" rows={14} value={content} onChange={(e) => setContent(e.target.value)} placeholder={"# Your H1 Heading Here\n\nStart writing your blog content in MDX format...\n\n## Section 1\n\nYour content here..."} />
                 <CharBar current={cw} min={1200} max={99999} unit="words" />
                 {content && !hasOneH1(content) && <p className="text-[11px] text-red-600 mt-1">Content must contain exactly one H1</p>}
                 {h2data.total > 0 && <span className="text-[11px] px-2 py-1 rounded-md bg-emerald-50 text-emerald-700 mt-1.5 inline-block">{h2data.q} of {h2data.total} H2s are question-phrased</span>}
@@ -564,6 +715,21 @@ function EditorView() {
                     />
                   </div>
                 )}
+              </div>
+              <div className="mb-4">
+                <FieldLabel required>Cover Image File</FieldLabel>
+                <Hint>Upload file as multipart field: cover_image</Hint>
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:border-emerald-500"
+                  onChange={(e) => setCoverImageFile(e.target.files?.[0] || null)}
+                />
+                {coverImageFile ? (
+                  <p className="text-[11px] text-emerald-700 mt-1">
+                    Selected: {coverImageFile.name}
+                  </p>
+                ) : null}
               </div>
               <div>
                 <div className="flex items-center justify-between mb-1">
@@ -776,7 +942,7 @@ function EditorView() {
                     {isAuthorsLoading ? "Loading authors..." : "Select author"}
                   </option>
                   {authorOptions.map((a) => (
-                    <option key={a.id} value={a.name}>{a.name}</option>
+                    <option key={a.id} value={a.id}>{a.name}</option>
                   ))}
                 </select>
                 {authorsError && <p className="text-[11px] text-red-600 mt-1">{authorsError}</p>}
@@ -814,8 +980,8 @@ function EditorView() {
             </GroupPanel>
 
             <div className="flex flex-col sm:flex-row gap-2.5 mt-4">
-              <button onClick={() => handleSave("draft")} className="flex-1 py-2.5 rounded-lg border border-gray-200 bg-white text-[13px] font-medium text-gray-600 hover:bg-gray-50 transition-colors">Save as draft</button>
-              <button onClick={() => handleSave("published")} disabled={!allValid} className={`flex-1 py-2.5 rounded-lg text-[13px] font-medium transition-colors ${allValid ? "bg-emerald-700 text-emerald-50 hover:bg-emerald-800" : "bg-gray-100 text-gray-400 cursor-not-allowed"}`}>Publish blog</button>
+              <button type="button" onClick={(e) => handleSubmit(e, "draft")} disabled={isSubmitting} className="flex-1 py-2.5 rounded-lg border border-gray-200 bg-white text-[13px] font-medium text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-60">Save as draft</button>
+              <button type="button" onClick={(e) => handleSubmit(e, "published")} disabled={!canPublish || isSubmitting} className={`flex-1 py-2.5 rounded-lg text-[13px] font-medium transition-colors ${canPublish && !isSubmitting ? "bg-emerald-700 text-emerald-50 hover:bg-emerald-800" : "bg-gray-100 text-gray-400 cursor-not-allowed"}`}>{isSubmitting ? "Publishing..." : "Publish blog"}</button>
             </div>
             {saveMsg && <p className="text-center text-[11px] text-gray-400 mt-2">{saveMsg}</p>}
           </div>
